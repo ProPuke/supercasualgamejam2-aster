@@ -1,0 +1,16 @@
+task build
+	requires {source/*.*}
+	run cp source/index.html release/
+	run rm -rf release
+	run mkdir release
+	run cp -r source/index.html release/index.html
+	run cp -r source/assets release/
+	run deno bundle -c source/deno.jsonc source/index.ts release/index.js
+
+task server
+	requires {source/*.*}
+	run deno run --allow-net=0.0.0.0 source/server.ts
+
+task server-debug
+	requires {source/*.*}
+	run deno run --inspect-brk --allow-net=0.0.0.0 source/server.ts

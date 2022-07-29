@@ -1,7 +1,8 @@
 import Client from "./Client.ts";
-import { add, clamp, concat_arrayBuffers, deltaLerp, dir, distance, dot, easeOutBounce, easeOutElastic, easeOutQuad, length, lerp, rescale, roughly, scale, string_to_uint8, tau, toward, uint8_to_string, Vec2, vector } from "./common.ts";
+import { add, clamp, concat_arrayBuffers, deltaLerp, dir, distance, dot, easeOutBounce, easeOutElastic, easeOutQuad, length, lerp, rescale, roughly, scale, string_to_uint8, sub, tau, toward, uint8_to_string, Vec2, vector } from "./common.ts";
 import Render from "./Render.ts";
 import * as connection from "./connection.ts";
+import { ReadBuffer, WriteBuffer } from "./Buffer.ts";
 
 class Mode {
 	startTime = Date.now();
@@ -19,11 +20,16 @@ class Mode {
 }
 
 class Unit {
+	visualOffset:Vec2 = [0,0];
 	health = 10;
 	knockback:Vec2 = [0,0];
 	lastDamageTime = 0;
 
 	constructor(public pos:Vec2) {
+	}
+
+	get visualPos() {
+		return add(this.pos, this.visualOffset);
 	}
 
 	take_damage(from:Vec2, player:Player|null):boolean {
@@ -48,21 +54,16 @@ class Unit {
 		}
 	}
 
-	serialise():ArrayBuffer[] {
-		const data:ArrayBuffer[] = [];
-
-		data.push(new Float32Array([this.pos[0], this.pos[1], this.knockback[0], this.knockback[1]]));
-		data.push(new Uint8Array([this.health]));
-
-		return data;
+	serialise(buffer:WriteBuffer) {
+		buffer.write_float32(this.pos[0], this.pos[1], this.knockback[0], this.knockback[1]);
+		buffer.write_uint8(this.health);
 	}
 
-	static deserialise_data(buffer:ArrayBuffer):[ArrayBuffer, number, Vec2, Vec2] {
-		const [posX, posY, knockbackX, knockbackY] = Array.from(new Float32Array(buffer.slice(0, 4*4))); buffer = buffer.slice(4*4);
+	static deserialise_data(buffer:ReadBuffer):[number, Vec2, Vec2] {
+		const [posX, posY, knockbackX, knockbackY] = buffer.read_float32(4);
+		const [health] = buffer.read_uint8(1);
 
-		const health = new Uint8Array(buffer.slice(0, 1))[0]; buffer = buffer.slice(1);
-
-		return [buffer, health, [posX, posY], [knockbackX, knockbackY]];
+		return [health, [posX, posY], [knockbackX, knockbackY]];
 	}
 }
 
@@ -71,6 +72,7 @@ export class Player extends Unit {
 	velocity:Vec2 = [0,0];
 	targetDir:number;
 	angle:number;
+	angleOffset = 0;
 	speed = 700.0;
 	lastExhaustTime = 0;
 	lastFireTime = 0;
@@ -89,6 +91,10 @@ export class Player extends Unit {
 		super(pos);
 		this.targetDir = angle;
 		this.angle = angle;
+	}
+
+	get visualAngle() {
+		return this.angle+this.angleOffset;
 	}
 
 	take_damage(from:Vec2, player:Player|null) {
@@ -116,64 +122,56 @@ export class Player extends Unit {
 		this.isRight = false;
 	}
 
-	serialise():ArrayBuffer[] {
-		const data:ArrayBuffer[] = super.serialise();
-
-		data.push(new Uint16Array([this.id]));
-		data.push(string_to_uint8(this.name));
-		data.push(new Float32Array([this.velocity[0], this.velocity[1], this.targetDir, this.angle]));
-		data.push(new Uint32Array([this.score]));
-		data.push(new Uint8Array([this.isAccelerating?1:0, this.isFiring?1:0, this.isUp?1:0, this.isDown?1:0, this.isLeft?1:0, this.isRight?1:0]));
-
-		return data;
+	serialise(buffer:WriteBuffer) {
+		super.serialise(buffer);
+		buffer.write_string(this.name);
+		buffer.write_float32(this.velocity[0], this.velocity[1], this.targetDir, this.angle);
+		buffer.write_uint32(this.score);
+		buffer.write_bool(this.isAccelerating, this.isFiring, this.isUp, this.isDown, this.isLeft, this.isRight);
 	}
 
-	static deserialise(buffer:ArrayBuffer):[ArrayBuffer,Player] {
-		let pos:Vec2;
-		let health:number;
-		let knockback:Vec2;
-		[buffer, health, pos, knockback] = Unit.deserialise_data(buffer);
+	deserialise(buffer:ReadBuffer, local = false) {
+		if(local){
+			let pos, knockback:Vec2;
+			[this.health, pos, knockback] = Unit.deserialise_data(buffer);
+		}else{
+			const oldPos = this.visualPos;
+			[this.health, this.pos, this.knockback] = Unit.deserialise_data(buffer);
+			if(oldPos[0]||oldPos[1]){
+				this.visualOffset = sub(oldPos, this.pos);
+			}else{
+				this.visualOffset = [0,0];
+			}
+		}
 
-		const id = new Uint16Array(buffer.slice(0, 2))[0]; buffer = buffer.slice(2);
-		let name:string;
-		[buffer, name] = uint8_to_string(buffer);
-
-		const [velocityX, velocityY, targetDir, angle] = Array.from(new Float32Array(buffer.slice(0, 4*4))); buffer = buffer.slice(4*4);
-
-		const score = new Uint32Array(buffer.slice(0, 1*4))[0]; buffer = buffer.slice(1*4);
-
-		const [isAccelerating, isFiring, isUp, isDown, isLeft, isRight] = Array.from(new Uint8Array(buffer.slice(0, 6))); buffer = buffer.slice(6);
-
-		const player = new Player(name, pos, angle);
-		player.health = health;
-		player.id = id;
-		player.knockback = knockback;
-		player.velocity = [velocityX, velocityY];
-		player.targetDir = targetDir;
-		player.score = score;
-		player.isAccelerating = !!isAccelerating;
-		player.isFiring = !!isFiring;
-		player.isUp = !!isUp;
-		player.isDown = !!isDown;
-		player.isLeft = !!isLeft;
-		player.isRight = !!isRight;
-
-		return [buffer, player];
+		this.name = buffer.read_string();
+		if(local){
+			buffer.read_float32(4);
+		}else{
+			const oldAngle = this.visualAngle;
+			[this.velocity[0], this.velocity[1], this.targetDir, this.angle] = buffer.read_float32(4);
+			if(oldAngle||this.angleOffset){
+				this.angleOffset = oldAngle - this.angle;
+			}else{
+				this.angleOffset = 0;
+			}
+		}
+		[this.score] = buffer.read_uint32(1);
+		if(local){
+			buffer.read_bool(6);
+		}else{
+			[this.isAccelerating, this.isFiring, this.isUp, this.isDown, this.isLeft, this.isRight] = buffer.read_bool(6);
+		}
 	}
 
-	serialise_input():ArrayBuffer[] {
-		const data:ArrayBuffer[] = [];
-
-		data.push(new Float32Array([this.pos[0], this.pos[1], this.velocity[0], this.velocity[1], this.targetDir, this.angle]));
-		console.log('send', [this.pos[0], this.pos[1], this.velocity[0], this.velocity[1], this.targetDir, this.angle]);
-		data.push(new Uint8Array([this.isAccelerating?1:0, this.isFiring?1:0, this.isUp?1:0, this.isDown?1:0, this.isLeft?1:0, this.isRight?1:0]));
-
-		return data;
+	serialise_input(buffer:WriteBuffer) {
+		buffer.write_float32(this.pos[0], this.pos[1], this.velocity[0], this.velocity[1], this.targetDir, this.angle);
+		buffer.write_uint8(this.isAccelerating?1:0, this.isFiring?1:0, this.isUp?1:0, this.isDown?1:0, this.isLeft?1:0, this.isRight?1:0);
 	}
 
-	deserialise_input(buffer:ArrayBuffer):ArrayBuffer {
-		const [posX, posY, velocityX, velocityY, targetDir, angle] = Array.from(new Float32Array(buffer.slice(0, 6*4))); buffer = buffer.slice(6*4);
-		const [isAccelerating, isFiring, isUp, isDown, isLeft, isRight] = Array.from(new Uint8Array(buffer.slice(0, 6))); buffer = buffer.slice(6);
+	deserialise_input(buffer:ReadBuffer) {
+		const [posX, posY, velocityX, velocityY, targetDir, angle] = buffer.read_float32(6);
+		const [isAccelerating, isFiring, isUp, isDown, isLeft, isRight] = buffer.read_uint8(6);
 
 		this.pos = [posX, posY];
 		this.velocity = [velocityX, velocityY];
@@ -210,18 +208,14 @@ class Shot {
 		this.angle = angle;
 	}
 
-	serialise():ArrayBuffer[] {
-		const data:ArrayBuffer[] = [];
-
-		data.push(new Uint16Array([this.owner===null?0:this.owner.id+1]));
-		data.push(new Float32Array([this.pos[0], this.pos[1], this.speed, this.velocity[0], this.velocity[1], this.angle, this.age]));
-
-		return data;
+	serialise(buffer:WriteBuffer) {
+		buffer.write_uint16(this.owner===null?0:this.owner.id+1);
+		buffer.write_float32(this.pos[0], this.pos[1], this.speed, this.velocity[0], this.velocity[1], this.angle, this.age);
 	}
 
-	static deserialise(players:Player[], buffer:ArrayBuffer):[ArrayBuffer,Shot] {
-		const playerId = new Uint16Array(buffer.slice(0, 2))[0]; buffer = buffer.slice(2);
-		const [posX, posY, speed, velocityX, velocityY, angle, age] = Array.from(new Float32Array(buffer.slice(0, 7*4))); buffer = buffer.slice(7*4);
+	static deserialise(players:Player[], buffer:ReadBuffer):Shot {
+		const [playerId] = buffer.read_uint16(1);
+		const [posX, posY, speed, velocityX, velocityY, angle, age] = buffer.read_float32(7);
 
 		let player:Player|null = null;
 		if(playerId>0){
@@ -237,7 +231,7 @@ class Shot {
 		shot.velocity = [velocityX, velocityY];
 		shot.age = age;
 
-		return [buffer, shot];
+		return shot;
 	}
 }
 
@@ -251,24 +245,20 @@ class Obstacle {
 		this.lastHitTime = Date.now();
 	}
 
-	serialise():ArrayBuffer[] {
-		const data:ArrayBuffer[] = [];
-
-		data.push(new Float32Array([this.pos[0], this.pos[1], this.radius]));
-
-		return data;
+	serialise(buffer:WriteBuffer) {
+		buffer.write_float32(this.pos[0], this.pos[1], this.radius);
 	}
 
-	static deserialise(buffer:ArrayBuffer):[ArrayBuffer,Obstacle] {
-		const [posX, posY, radius] = Array.from(new Float32Array(buffer.slice(0, 3*4))); buffer = buffer.slice(3*4);
+	static deserialise(buffer:ReadBuffer):Obstacle {
+		const [posX, posY, radius] = buffer.read_float32(3);
 
 		const obstacle = new Obstacle([posX, posY], radius);
 
-		return [buffer, obstacle];
+		return obstacle;
 	}
 }
 
-class Enemy extends Unit {
+abstract class Enemy extends Unit {
 	get radius() { return 20; }
 
 	constructor(pos:Vec2) {
@@ -280,23 +270,8 @@ class Enemy extends Unit {
 		super.update(play, delta);
 	}
 
-	serialise():ArrayBuffer[] {
-		const data:ArrayBuffer[] = super.serialise();
-
-		return data;
-	}
-
-	static deserialise(buffer:ArrayBuffer):[ArrayBuffer,Enemy] {
-		let pos:Vec2;
-		let health:number;
-		let knockback:Vec2;
-		[buffer, health, pos, knockback] = Unit.deserialise_data(buffer);
-
-		const enemy = new Enemy(pos);
-		enemy.health = health;
-		enemy.knockback = knockback;
-
-		return [buffer, enemy];
+	serialise(buffer:WriteBuffer) {
+		super.serialise(buffer);
 	}
 }
 
@@ -310,6 +285,20 @@ class EnemySpinner extends Enemy {
 	}
 
 	get radius() { return this.health * 6; }
+
+	serialise(buffer:WriteBuffer) {
+		super.serialise(buffer);
+	}
+
+	static deserialise(buffer:ReadBuffer):Enemy {
+		const [health, pos, knockback] = Unit.deserialise_data(buffer);
+
+		const enemy = new EnemySpinner(pos);
+		enemy.health = health;
+		enemy.knockback = knockback;
+
+		return enemy;
+	}
 
 	update(play:PlayMode, delta:number) {
 		super.update(play, delta);
@@ -443,7 +432,7 @@ export class PlayMode extends Mode {
 			}
 
 			const onMessage = (data:ArrayBuffer) => {
-				this.deserialise(data);
+				this.deserialise(new ReadBuffer(data));
 			};
 
 			client.events.once('disconnected', onDisconnected);
@@ -505,45 +494,45 @@ export class PlayMode extends Mode {
 		return this.players.filter(x => x.health>0);
 	}
 
-	serialise(player:Player|undefined):ArrayBuffer[] {
-		const data:ArrayBuffer[] = [];
-
-		data.push(new Float64Array([Date.now()]));
-		data.push(new Uint16Array([player?player.id+1:0, this.worldSize[0], this.worldSize[1], this.players.length]));
+	serialise(player:Player|undefined, buffer:WriteBuffer) {
+		buffer.write_float64(Date.now());
+		buffer.write_uint16(player?player.id+1:0, this.worldSize[0], this.worldSize[1], this.players.length);
 		for(const player of this.players){
-			data.push(...player.serialise());
+			buffer.write_uint16(player.id);
+			player.serialise(buffer);
 		}
-		data.push(new Uint16Array([this.shots.length]));
+		buffer.write_uint16(this.shots.length);
 		for(const shot of this.shots){
-			data.push(...shot.serialise());
+			shot.serialise(buffer);
 		}
-		data.push(new Uint16Array([this.obstacles.length]));
+		buffer.write_uint16(this.obstacles.length);
 		for(const obstacle of this.obstacles){
-			data.push(...obstacle.serialise());
+			obstacle.serialise(buffer);
 		}
-		data.push(new Uint16Array([this.enemies.length]));
+		buffer.write_uint16(this.enemies.length);
 		for(const enemy of this.enemies){
-			data.push(...enemy.serialise());
+			enemy.serialise(buffer);
 		}
-
-		return data;
 	}
 
-	deserialise(buffer:ArrayBuffer) {
-		const time = new Float64Array(buffer.slice(0, 8))[0]; buffer = buffer.slice(8);
+	deserialise(buffer:ReadBuffer) {
+		const [time] = buffer.read_float64(1);
 
 		const timeOffset = time-Date.now();
 
-		const [playerId, sizeX, sizeY, playerCount] = new Uint16Array(buffer.slice(0, 4*2)); buffer = buffer.slice(4*2);
+		const [playerId, sizeX, sizeY, playerCount] = buffer.read_uint16(4);
 
 		const oldPlayers = this.players.slice();
+		const oldLocalPlayer = this.localPlayer;
 		
 		this.worldSize = [sizeX, sizeY];
 		this.players.length = 0;
 		this.localPlayer = undefined;
 		for(let i=0;i<playerCount;i++){
-			let player:Player;
-			[buffer, player] = Player.deserialise(buffer);
+			const [id] = buffer.read_uint16(1);
+			const player = oldPlayers.find(x => x.id==id)||new Player('unnamed', [0,0], 0);
+			player.id = id;
+			player.deserialise(buffer, player==oldLocalPlayer);
 			this.players.push(player);
 
 			if(playerId>0&&player.id==playerId-1){
@@ -551,27 +540,24 @@ export class PlayMode extends Mode {
 			}
 		}
 
-		const shotCount = new Uint16Array(buffer.slice(0, 2))[0]; buffer = buffer.slice(2);
+		const [shotCount] = buffer.read_uint16(1);
 		this.shots.length = 0;
 		for(let i=0;i<shotCount;i++){
-			let shot:Shot;
-			[buffer, shot] = Shot.deserialise(this.players, buffer);
+			const shot = Shot.deserialise(this.players, buffer);
 			this.shots.push(shot);
 		}
 
-		const obstacleCount = new Uint16Array(buffer.slice(0, 2))[0]; buffer = buffer.slice(2);
+		const [obstacleCount] = buffer.read_uint16(1);
 		this.obstacles.length = 0;
 		for(let i=0;i<obstacleCount;i++){
-			let obstacle:Obstacle;
-			[buffer, obstacle] = Obstacle.deserialise(buffer);
+			const obstacle = Obstacle.deserialise(buffer);
 			this.obstacles.push(obstacle);
 		}
 
-		const enemyCount = new Uint16Array(buffer.slice(0, 2))[0]; buffer = buffer.slice(2);
+		const [enemyCount] = buffer.read_uint16(1);
 		this.enemies.length = 0;
 		for(let i=0;i<enemyCount;i++){
-			let enemy:Enemy;
-			[buffer, enemy] = Enemy.deserialise(buffer);
+			const enemy = EnemySpinner.deserialise(buffer);
 			this.enemies.push(enemy);
 		}
 	}
@@ -580,7 +566,9 @@ export class PlayMode extends Mode {
 		if(!this.client||!this.localPlayer) return;
 
 		this.lastClientUpdateTime = Date.now();
-		this.client.send(concat_arrayBuffers(this.localPlayer.serialise_input()));
+		const buffer = new WriteBuffer;
+		this.localPlayer.serialise_input(buffer);
+		this.client.send(buffer.get_buffer());
 	}
 
 	pos_is_available(pos:Vec2, radius:number, checkEnemies = true) {
@@ -747,6 +735,10 @@ export class PlayMode extends Mode {
 		}
 
 		for(const player of this.players){
+			player.visualOffset[0] = deltaLerp(player.visualOffset[0], 0, 0.95, delta);
+			player.visualOffset[1] = deltaLerp(player.visualOffset[1], 0, 0.95, delta);
+			player.angleOffset = deltaLerp(player.angleOffset, 0, 0.95, delta);
+
 			if(player.health>0){
 				player.update(this, delta);
 
@@ -1087,7 +1079,7 @@ export class PlayMode extends Mode {
 						if(player.health<1){
 							r.alpha(0.5);
 						}
-						draw_ship(player.pos, player.angle, player.isFiring, player.lastDamageTime);
+						draw_ship(player.visualPos, player.visualAngle, player.isFiring, player.lastDamageTime);
 						r.alpha(1.0);
 					}
 				}
@@ -1103,7 +1095,8 @@ export class PlayMode extends Mode {
 					draw_obstacle(obstacle.pos, obstacle.radius+lerp(-5, 0, easeOutElastic(phase)));
 				}
 				for(const player of this.players){
-					r.draw_text([player.pos[0]-50, player.pos[1]-60], 100, 0.5, 'bold 20px sans-serif', player.name, player.health>0?'#000':'#0008');
+					const playerPos = player.visualPos;
+					r.draw_text([playerPos[0]-50, playerPos[1]-60], 100, 0.5, 'bold 20px sans-serif', player.name, player.health>0?'#000':'#0008');
 
 					const invulnerableTime = now - player.lastDamageTime;
 					if(player.health>0&&player.health<10){
@@ -1111,8 +1104,8 @@ export class PlayMode extends Mode {
 							//invisible flash
 						}else{
 							for(let i=0;i<10;i++){
-								r.draw_box_gradient_v([player.pos[0]-64+i*13, player.pos[1]-50], [10,16], i<player.health?['#0f0', '#0a0']:['#800', '#600']);
-								r.draw_box([player.pos[0]-64+i*13, player.pos[1]-50], [10,16], false, 1, '#000');
+								r.draw_box_gradient_v([playerPos[0]-64+i*13, playerPos[1]-50], [10,16], i<player.health?['#0f0', '#0a0']:['#800', '#600']);
+								r.draw_box([playerPos[0]-64+i*13, playerPos[1]-50], [10,16], false, 1, '#000');
 							}
 						}
 					}
@@ -1324,13 +1317,13 @@ export default class Game {
 
 	buttonsDown = new Set<string>();
 
-	constructor(render:Render|undefined, showMenu = true) {
+	constructor(render:Render|undefined, showMenu = true, spawnPlayer = true) {
 		this.render = render;
 
 		if(showMenu){
 			this.push_mode(new StartMode(this));
 		}else{
-			this.push_mode(new PlayMode(this, null, true));
+			this.push_mode(new PlayMode(this, null, spawnPlayer));
 		}
 	}
 

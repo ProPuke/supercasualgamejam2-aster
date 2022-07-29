@@ -117,6 +117,12 @@ function add(a, b) {
         a[1] + b[1]
     ];
 }
+function sub(a, b) {
+    return [
+        a[0] - b[0],
+        a[1] - b[1]
+    ];
+}
 function scale(a, b) {
     return [
         a[0] * b,
@@ -175,9 +181,8 @@ function string_to_uint8(value) {
 }
 function uint8_to_string(buffer) {
     const length = new Uint8Array(buffer.slice(0, 1))[0];
-    buffer = buffer.slice(1);
-    const data = new Uint8Array(buffer.slice(0, length));
-    buffer = buffer.slice(length);
+    const data = new Uint8Array(buffer.slice(1, 1 + length));
+    buffer = buffer.slice(1 + length);
     let value = '';
     for (const item of data){
         value += String.fromCharCode(item);
@@ -209,6 +214,73 @@ class Client {
     }
 }
 const address = `ws://localhost:${8764}`;
+class WriteBuffer {
+    buffers = [];
+    write_string(value) {
+        this.buffers.push(string_to_uint8(value));
+    }
+    write_bool(...values) {
+        const data = [];
+        for (const value of values){
+            data.push(value ? 1 : 0);
+        }
+        this.write_uint8(...data);
+    }
+    write_uint8(...values) {
+        this.buffers.push(new Uint8Array(values));
+    }
+    write_uint16(...values) {
+        this.buffers.push(new Uint16Array(values));
+    }
+    write_uint32(...values) {
+        this.buffers.push(new Uint32Array(values));
+    }
+    write_float32(...values) {
+        this.buffers.push(new Float32Array(values));
+    }
+    write_float64(...values) {
+        this.buffers.push(new Float64Array(values));
+    }
+    get_buffer() {
+        return concat_arrayBuffers(this.buffers);
+    }
+}
+class ReadBuffer {
+    x;
+    constructor(buffer){
+        this.buffer = buffer;
+        this.x = 0;
+    }
+    read_string() {
+        let value;
+        [this.buffer, value] = uint8_to_string(this.buffer.slice(this.x));
+        this.x = 0;
+        return value;
+    }
+    read_bool(count) {
+        const values = [];
+        for (const value of this.read_uint8(count)){
+            values.push(!!value);
+        }
+        return values;
+    }
+    read_uint8(count) {
+        return new Uint8Array(this.buffer.slice(this.x, this.x += count * 1));
+    }
+    read_uint16(count) {
+        return new Uint16Array(this.buffer.slice(this.x, this.x += count * 2));
+    }
+    read_uint32(count) {
+        return new Uint32Array(this.buffer.slice(this.x, this.x += count * 4));
+    }
+    read_float32(count) {
+        return new Float32Array(this.buffer.slice(this.x, this.x += count * 4));
+    }
+    read_float64(count) {
+        return new Float64Array(this.buffer.slice(this.x, this.x += count * 8));
+    }
+    buffer;
+}
 class Mode {
     startTime = Date.now();
     on_button_down(button) {
@@ -221,17 +293,25 @@ class Mode {
     draw(r) {}
 }
 class Unit {
+    visualOffset;
     health;
     knockback;
     lastDamageTime;
     constructor(pos){
         this.pos = pos;
+        this.visualOffset = [
+            0,
+            0
+        ];
         this.health = 10;
         this.knockback = [
             0,
             0
         ];
         this.lastDamageTime = 0;
+    }
+    get visualPos() {
+        return add(this.pos, this.visualOffset);
     }
     take_damage(from, player) {
         if (this.health < 1) return false;
@@ -252,26 +332,14 @@ class Unit {
             this.pos[1] += motion[1];
         }
     }
-    serialise() {
-        const data = [];
-        data.push(new Float32Array([
-            this.pos[0],
-            this.pos[1],
-            this.knockback[0],
-            this.knockback[1]
-        ]));
-        data.push(new Uint8Array([
-            this.health
-        ]));
-        return data;
+    serialise(buffer) {
+        buffer.write_float32(this.pos[0], this.pos[1], this.knockback[0], this.knockback[1]);
+        buffer.write_uint8(this.health);
     }
     static deserialise_data(buffer) {
-        const [posX, posY, knockbackX, knockbackY] = Array.from(new Float32Array(buffer.slice(0, 4 * 4)));
-        buffer = buffer.slice(4 * 4);
-        const health = new Uint8Array(buffer.slice(0, 1))[0];
-        buffer = buffer.slice(1);
+        const [posX, posY, knockbackX, knockbackY] = buffer.read_float32(4);
+        const [health] = buffer.read_uint8(1);
         return [
-            buffer,
             health,
             [
                 posX,
@@ -290,6 +358,7 @@ class Player extends Unit {
     velocity;
     targetDir;
     angle;
+    angleOffset;
     speed;
     lastExhaustTime;
     lastFireTime;
@@ -309,6 +378,7 @@ class Player extends Unit {
             0,
             0
         ];
+        this.angleOffset = 0;
         this.speed = 700.0;
         this.lastExhaustTime = 0;
         this.lastFireTime = 0;
@@ -321,6 +391,9 @@ class Player extends Unit {
         this.isRight = false;
         this.targetDir = angle;
         this.angle = angle;
+    }
+    get visualAngle() {
+        return this.angle + this.angleOffset;
     }
     take_damage(from, player) {
         if (Date.now() - this.lastDamageTime < Player.invulnerabilityDuration * 1000) return false;
@@ -341,100 +414,55 @@ class Player extends Unit {
         this.isLeft = false;
         this.isRight = false;
     }
-    serialise() {
-        const data = super.serialise();
-        data.push(new Uint16Array([
-            this.id
-        ]));
-        data.push(string_to_uint8(this.name));
-        data.push(new Float32Array([
-            this.velocity[0],
-            this.velocity[1],
-            this.targetDir,
-            this.angle
-        ]));
-        data.push(new Uint32Array([
-            this.score
-        ]));
-        data.push(new Uint8Array([
-            this.isAccelerating ? 1 : 0,
-            this.isFiring ? 1 : 0,
-            this.isUp ? 1 : 0,
-            this.isDown ? 1 : 0,
-            this.isLeft ? 1 : 0,
-            this.isRight ? 1 : 0
-        ]));
-        return data;
+    serialise(buffer) {
+        super.serialise(buffer);
+        buffer.write_string(this.name);
+        buffer.write_float32(this.velocity[0], this.velocity[1], this.targetDir, this.angle);
+        buffer.write_uint32(this.score);
+        buffer.write_bool(this.isAccelerating, this.isFiring, this.isUp, this.isDown, this.isLeft, this.isRight);
     }
-    static deserialise(buffer) {
-        let pos;
-        let health;
-        let knockback;
-        [buffer, health, pos, knockback] = Unit.deserialise_data(buffer);
-        const id = new Uint16Array(buffer.slice(0, 2))[0];
-        buffer = buffer.slice(2);
-        let name;
-        [buffer, name] = uint8_to_string(buffer);
-        const [velocityX, velocityY, targetDir, angle] = Array.from(new Float32Array(buffer.slice(0, 4 * 4)));
-        buffer = buffer.slice(4 * 4);
-        const score = new Uint32Array(buffer.slice(0, 1 * 4))[0];
-        buffer = buffer.slice(1 * 4);
-        const [isAccelerating, isFiring, isUp, isDown, isLeft, isRight] = Array.from(new Uint8Array(buffer.slice(0, 6)));
-        buffer = buffer.slice(6);
-        const player = new Player(name, pos, angle);
-        player.health = health;
-        player.id = id;
-        player.knockback = knockback;
-        player.velocity = [
-            velocityX,
-            velocityY
-        ];
-        player.targetDir = targetDir;
-        player.score = score;
-        player.isAccelerating = !!isAccelerating;
-        player.isFiring = !!isFiring;
-        player.isUp = !!isUp;
-        player.isDown = !!isDown;
-        player.isLeft = !!isLeft;
-        player.isRight = !!isRight;
-        return [
-            buffer,
-            player
-        ];
+    deserialise(buffer, local = false) {
+        if (local) {
+            let pos, knockback;
+            [this.health, pos, knockback] = Unit.deserialise_data(buffer);
+        } else {
+            const oldPos = this.visualPos;
+            [this.health, this.pos, this.knockback] = Unit.deserialise_data(buffer);
+            if (oldPos[0] || oldPos[1]) {
+                this.visualOffset = sub(oldPos, this.pos);
+            } else {
+                this.visualOffset = [
+                    0,
+                    0
+                ];
+            }
+        }
+        this.name = buffer.read_string();
+        if (local) {
+            buffer.read_float32(4);
+        } else {
+            const oldAngle = this.visualAngle;
+            [this.velocity[0], this.velocity[1], this.targetDir, this.angle] = buffer.read_float32(4);
+            if (oldAngle || this.angleOffset) {
+                this.angleOffset = oldAngle - this.angle;
+            } else {
+                this.angleOffset = 0;
+            }
+        }
+        [this.score] = buffer.read_uint32(1);
+        if (local) {
+            buffer.read_bool(6);
+        } else {
+            [this.isAccelerating, this.isFiring, this.isUp, this.isDown, this.isLeft, this.isRight] = buffer.read_bool(6);
+        }
     }
-    serialise_input() {
-        const data = [];
-        data.push(new Float32Array([
-            this.pos[0],
-            this.pos[1],
-            this.velocity[0],
-            this.velocity[1],
-            this.targetDir,
-            this.angle
-        ]));
-        console.log('send', [
-            this.pos[0],
-            this.pos[1],
-            this.velocity[0],
-            this.velocity[1],
-            this.targetDir,
-            this.angle
-        ]);
-        data.push(new Uint8Array([
-            this.isAccelerating ? 1 : 0,
-            this.isFiring ? 1 : 0,
-            this.isUp ? 1 : 0,
-            this.isDown ? 1 : 0,
-            this.isLeft ? 1 : 0,
-            this.isRight ? 1 : 0
-        ]));
-        return data;
+    serialise_input(buffer) {
+        buffer.write_float32(this.pos[0], this.pos[1], this.velocity[0], this.velocity[1], this.targetDir, this.angle);
+        buffer.write_uint8(this.isAccelerating ? 1 : 0, this.isFiring ? 1 : 0, this.isUp ? 1 : 0, this.isDown ? 1 : 0, this.isLeft ? 1 : 0, this.isRight ? 1 : 0);
     }
     deserialise_input(buffer) {
-        const [posX, posY, velocityX, velocityY, targetDir, angle] = Array.from(new Float32Array(buffer.slice(0, 6 * 4)));
-        buffer = buffer.slice(6 * 4);
-        const [isAccelerating, isFiring, isUp, isDown, isLeft, isRight] = Array.from(new Uint8Array(buffer.slice(0, 6)));
-        buffer = buffer.slice(6);
+        const [posX, posY, velocityX, velocityY, targetDir, angle] = buffer.read_float32(6);
+        const [isAccelerating, isFiring, isUp, isDown, isLeft, isRight] = buffer.read_uint8(6);
         this.pos = [
             posX,
             posY
@@ -487,27 +515,13 @@ class Shot {
         this.age = 0.0;
         this.angle = angle;
     }
-    serialise() {
-        const data = [];
-        data.push(new Uint16Array([
-            this.owner === null ? 0 : this.owner.id + 1
-        ]));
-        data.push(new Float32Array([
-            this.pos[0],
-            this.pos[1],
-            this.speed,
-            this.velocity[0],
-            this.velocity[1],
-            this.angle,
-            this.age
-        ]));
-        return data;
+    serialise(buffer) {
+        buffer.write_uint16(this.owner === null ? 0 : this.owner.id + 1);
+        buffer.write_float32(this.pos[0], this.pos[1], this.speed, this.velocity[0], this.velocity[1], this.angle, this.age);
     }
     static deserialise(players, buffer) {
-        const playerId = new Uint16Array(buffer.slice(0, 2))[0];
-        buffer = buffer.slice(2);
-        const [posX, posY, speed, velocityX, velocityY, angle, age] = Array.from(new Float32Array(buffer.slice(0, 7 * 4)));
-        buffer = buffer.slice(7 * 4);
+        const [playerId] = buffer.read_uint16(1);
+        const [posX, posY, speed, velocityX, velocityY, angle, age] = buffer.read_float32(7);
         let player = null;
         if (playerId > 0) {
             for (const search of players){
@@ -526,10 +540,7 @@ class Shot {
             velocityY
         ];
         shot.age = age;
-        return [
-            buffer,
-            shot
-        ];
+        return shot;
     }
     owner;
     pos;
@@ -545,26 +556,16 @@ class Obstacle {
     on_hit() {
         this.lastHitTime = Date.now();
     }
-    serialise() {
-        const data = [];
-        data.push(new Float32Array([
-            this.pos[0],
-            this.pos[1],
-            this.radius
-        ]));
-        return data;
+    serialise(buffer) {
+        buffer.write_float32(this.pos[0], this.pos[1], this.radius);
     }
     static deserialise(buffer) {
-        const [posX, posY, radius] = Array.from(new Float32Array(buffer.slice(0, 3 * 4)));
-        buffer = buffer.slice(3 * 4);
+        const [posX, posY, radius] = buffer.read_float32(3);
         const obstacle = new Obstacle([
             posX,
             posY
         ], radius);
-        return [
-            buffer,
-            obstacle
-        ];
+        return obstacle;
     }
     pos;
     radius;
@@ -580,22 +581,8 @@ class Enemy extends Unit {
     update(play, delta) {
         super.update(play, delta);
     }
-    serialise() {
-        const data = super.serialise();
-        return data;
-    }
-    static deserialise(buffer) {
-        let pos;
-        let health;
-        let knockback;
-        [buffer, health, pos, knockback] = Unit.deserialise_data(buffer);
-        const enemy = new Enemy(pos);
-        enemy.health = health;
-        enemy.knockback = knockback;
-        return [
-            buffer,
-            enemy
-        ];
+    serialise(buffer) {
+        super.serialise(buffer);
     }
 }
 class EnemySpinner extends Enemy {
@@ -607,6 +594,16 @@ class EnemySpinner extends Enemy {
     }
     get radius() {
         return this.health * 6;
+    }
+    serialise(buffer) {
+        super.serialise(buffer);
+    }
+    static deserialise(buffer) {
+        const [health, pos, knockback] = Unit.deserialise_data(buffer);
+        const enemy = new EnemySpinner(pos);
+        enemy.health = health;
+        enemy.knockback = knockback;
+        return enemy;
     }
     update(play, delta) {
         super.update(play, delta);
@@ -737,7 +734,7 @@ class PlayMode extends Mode {
                 }
             };
             const onMessage = (data)=>{
-                this.deserialise(data);
+                this.deserialise(new ReadBuffer(data));
             };
             client.events.once('disconnected', onDisconnected);
             client.events.on('message', onMessage);
@@ -792,47 +789,32 @@ class PlayMode extends Mode {
     get activePlayers() {
         return this.players.filter((x)=>x.health > 0);
     }
-    serialise(player) {
-        const data = [];
-        data.push(new Float64Array([
-            Date.now()
-        ]));
-        data.push(new Uint16Array([
-            player ? player.id + 1 : 0,
-            this.worldSize[0],
-            this.worldSize[1],
-            this.players.length
-        ]));
+    serialise(player, buffer) {
+        buffer.write_float64(Date.now());
+        buffer.write_uint16(player ? player.id + 1 : 0, this.worldSize[0], this.worldSize[1], this.players.length);
         for (const player1 of this.players){
-            data.push(...player1.serialise());
+            buffer.write_uint16(player1.id);
+            player1.serialise(buffer);
         }
-        data.push(new Uint16Array([
-            this.shots.length
-        ]));
+        buffer.write_uint16(this.shots.length);
         for (const shot of this.shots){
-            data.push(...shot.serialise());
+            shot.serialise(buffer);
         }
-        data.push(new Uint16Array([
-            this.obstacles.length
-        ]));
+        buffer.write_uint16(this.obstacles.length);
         for (const obstacle of this.obstacles){
-            data.push(...obstacle.serialise());
+            obstacle.serialise(buffer);
         }
-        data.push(new Uint16Array([
-            this.enemies.length
-        ]));
+        buffer.write_uint16(this.enemies.length);
         for (const enemy of this.enemies){
-            data.push(...enemy.serialise());
+            enemy.serialise(buffer);
         }
-        return data;
     }
     deserialise(buffer) {
-        const time = new Float64Array(buffer.slice(0, 8))[0];
-        buffer = buffer.slice(8);
+        const [time] = buffer.read_float64(1);
         time - Date.now();
-        const [playerId, sizeX, sizeY, playerCount] = new Uint16Array(buffer.slice(0, 4 * 2));
-        buffer = buffer.slice(4 * 2);
-        this.players.slice();
+        const [playerId, sizeX, sizeY, playerCount] = buffer.read_uint16(4);
+        const oldPlayers = this.players.slice();
+        const oldLocalPlayer = this.localPlayer;
         this.worldSize = [
             sizeX,
             sizeY
@@ -840,42 +822,43 @@ class PlayMode extends Mode {
         this.players.length = 0;
         this.localPlayer = undefined;
         for(let i = 0; i < playerCount; i++){
-            let player;
-            [buffer, player] = Player.deserialise(buffer);
+            const [id] = buffer.read_uint16(1);
+            const player = oldPlayers.find((x)=>x.id == id) || new Player('unnamed', [
+                0,
+                0
+            ], 0);
+            player.id = id;
+            player.deserialise(buffer, player == oldLocalPlayer);
             this.players.push(player);
             if (playerId > 0 && player.id == playerId - 1) {
                 this.localPlayer = player;
             }
         }
-        const shotCount = new Uint16Array(buffer.slice(0, 2))[0];
-        buffer = buffer.slice(2);
+        const [shotCount] = buffer.read_uint16(1);
         this.shots.length = 0;
         for(let i1 = 0; i1 < shotCount; i1++){
-            let shot;
-            [buffer, shot] = Shot.deserialise(this.players, buffer);
+            const shot = Shot.deserialise(this.players, buffer);
             this.shots.push(shot);
         }
-        const obstacleCount = new Uint16Array(buffer.slice(0, 2))[0];
-        buffer = buffer.slice(2);
+        const [obstacleCount] = buffer.read_uint16(1);
         this.obstacles.length = 0;
         for(let i2 = 0; i2 < obstacleCount; i2++){
-            let obstacle;
-            [buffer, obstacle] = Obstacle.deserialise(buffer);
+            const obstacle = Obstacle.deserialise(buffer);
             this.obstacles.push(obstacle);
         }
-        const enemyCount = new Uint16Array(buffer.slice(0, 2))[0];
-        buffer = buffer.slice(2);
+        const [enemyCount] = buffer.read_uint16(1);
         this.enemies.length = 0;
         for(let i3 = 0; i3 < enemyCount; i3++){
-            let enemy;
-            [buffer, enemy] = Enemy.deserialise(buffer);
+            const enemy = EnemySpinner.deserialise(buffer);
             this.enemies.push(enemy);
         }
     }
     send_client_update() {
         if (!this.client || !this.localPlayer) return;
         this.lastClientUpdateTime = Date.now();
-        this.client.send(concat_arrayBuffers(this.localPlayer.serialise_input()));
+        const buffer = new WriteBuffer;
+        this.localPlayer.serialise_input(buffer);
+        this.client.send(buffer.get_buffer());
     }
     pos_is_available(pos, radius, checkEnemies = true) {
         if (pos[0] < 0 + radius) return false;
@@ -1022,6 +1005,9 @@ class PlayMode extends Mode {
             this.enemies.push(new EnemySpinner(positions[0][1]));
         }
         for (const player1 of this.players){
+            player1.visualOffset[0] = deltaLerp(player1.visualOffset[0], 0, 0.95, delta);
+            player1.visualOffset[1] = deltaLerp(player1.visualOffset[1], 0, 0.95, delta);
+            player1.angleOffset = deltaLerp(player1.angleOffset, 0, 0.95, delta);
             if (player1.health > 0) {
                 player1.update(this, delta);
                 if (!player1.isFiring) {
@@ -1390,7 +1376,7 @@ class PlayMode extends Mode {
                 if (player.health < 1) {
                     r.alpha(0.5);
                 }
-                draw_ship(player.pos, player.angle, player.isFiring, player.lastDamageTime);
+                draw_ship(player.visualPos, player.visualAngle, player.isFiring, player.lastDamageTime);
                 r.alpha(1.0);
             }
         }
@@ -1406,17 +1392,18 @@ class PlayMode extends Mode {
             draw_obstacle(obstacle.pos, obstacle.radius + lerp(-5, 0, easeOutElastic(phase)));
         }
         for (const player1 of this.players){
+            const playerPos = player1.visualPos;
             r.draw_text([
-                player1.pos[0] - 50,
-                player1.pos[1] - 60
+                playerPos[0] - 50,
+                playerPos[1] - 60
             ], 100, 0.5, 'bold 20px sans-serif', player1.name, player1.health > 0 ? '#000' : '#0008');
             const invulnerableTime1 = now - player1.lastDamageTime;
             if (player1.health > 0 && player1.health < 10) {
                 if (invulnerableTime1 < Player.invulnerabilityDuration * 1000 && (0 | invulnerableTime1 / 100) % 2 == 0) {} else {
                     for(let i = 0; i < 10; i++){
                         r.draw_box_gradient_v([
-                            player1.pos[0] - 64 + i * 13,
-                            player1.pos[1] - 50
+                            playerPos[0] - 64 + i * 13,
+                            playerPos[1] - 50
                         ], [
                             10,
                             16
@@ -1428,8 +1415,8 @@ class PlayMode extends Mode {
                             '#600'
                         ]);
                         r.draw_box([
-                            player1.pos[0] - 64 + i * 13,
-                            player1.pos[1] - 50
+                            playerPos[0] - 64 + i * 13,
+                            playerPos[1] - 50
                         ], [
                             10,
                             16
@@ -1666,12 +1653,12 @@ class Game {
     render;
     modes = [];
     buttonsDown = new Set();
-    constructor(render, showMenu = true){
+    constructor(render, showMenu = true, spawnPlayer = true){
         this.render = render;
         if (showMenu) {
             this.push_mode(new StartMode(this));
         } else {
-            this.push_mode(new PlayMode(this, null, true));
+            this.push_mode(new PlayMode(this, null, spawnPlayer));
         }
     }
     push_mode(mode) {

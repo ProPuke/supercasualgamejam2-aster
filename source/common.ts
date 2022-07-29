@@ -40,6 +40,10 @@ export function add(a:Vec2, b:Vec2):Vec2 {
 	return [a[0]+b[0], a[1]+b[1]];
 }
 
+export function sub(a:Vec2, b:Vec2):Vec2 {
+	return [a[0]-b[0], a[1]-b[1]];
+}
+
 export function scale(a:Vec2, b:number):Vec2 {
 	return [a[0]*b, a[1]*b];
 }
@@ -118,8 +122,9 @@ export function string_to_uint8(value:string):Uint8Array {
 }
 
 export function uint8_to_string(buffer:ArrayBuffer):[ArrayBuffer, string] {
-	const length = new Uint8Array(buffer.slice(0, 1))[0]; buffer = buffer.slice(1);
-	const data = new Uint8Array(buffer.slice(0, length)); buffer = buffer.slice(length);
+	const length = new Uint8Array(buffer.slice(0, 1))[0];
+	const data = new Uint8Array(buffer.slice(1, 1+length));
+	buffer = buffer.slice(1+length);
 
 	let value = '';
 	for(const item of data){

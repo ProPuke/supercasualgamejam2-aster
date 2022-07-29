@@ -4,6 +4,7 @@ import EventEmitter from "https://deno.land/x/eventemitter@1.2.1/mod.ts";
 import * as connection from "./connection.ts";
 import Game, { Player, PlayMode } from "./Game.ts";
 import { concat_arrayBuffers, uint8_to_string } from "./common.ts";
+import { ReadBuffer, WriteBuffer } from "./Buffer.ts";
 
 enum ClientSessionStage {
 	handshake,
@@ -39,9 +40,11 @@ class ClientSession {
 	}
 
 	async onClientMessage(data:ArrayBuffer) {
+		const buffer = new ReadBuffer(data);
+
 		switch(this.stage){
 			case ClientSessionStage.handshake:
-				[data, this.playerName] = uint8_to_string(data);
+				this.playerName = buffer.read_string();
 				if(this.playerName.length<1){
 					console.error(`Error: missing client name. Killed.`);
 					this.disconnect();
@@ -52,7 +55,7 @@ class ClientSession {
 			case ClientSessionStage.playing:
 				if(!this.player) break;
 
-				this.player.deserialise_input(data);
+				this.player.deserialise_input(buffer);
 			break;
 		}
 	}
@@ -78,15 +81,18 @@ class ClientSession {
 		const play = get_play();
 
 		try{
-			this.websocket.send(concat_arrayBuffers(play.serialise(this.player)));
+			const buffer = new WriteBuffer;
+			play.serialise(this.player, buffer);
+			this.websocket.send(buffer.get_buffer());
 		}catch(error){
 			console.error(`Error sending to socket for ${this.playerName||'[unnamed]'}`);
+			console.error(error);
 			this.disconnect();
 		}
 	}
 }
 
-const game = new Game(undefined, false);
+const game = new Game(undefined, false, false);
 const maxPlayers = 4;
 
 function get_play():PlayMode {

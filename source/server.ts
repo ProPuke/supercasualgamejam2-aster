@@ -1,11 +1,13 @@
-import { assert } from "https://deno.land/std@0.149.0/testing/asserts.ts";
-import { serve } from "https://deno.land/std@0.149.0/http/mod.ts";
+import { assert } from "https://deno.land/std@0.150.0/testing/asserts.ts";
+import { serve } from "https://deno.land/std@0.150.0/http/mod.ts";
+import { serveTls } from "https://deno.land/std@0.150.0/http/server.ts";
 import EventEmitter from "https://deno.land/x/eventemitter@1.2.1/mod.ts";
 import * as connection from "./connection.ts";
 import Game, { Player, PlayMode } from "./Game.ts";
 import { concat_arrayBuffers, uint8_to_string } from "./common.ts";
 import { ReadBuffer, WriteBuffer } from "./Buffer.ts";
 import PacketType from "./PacketType.ts";
+import serverConfig from "./serverConfig.ts";
 
 enum ClientSessionStage {
 	handshake,
@@ -133,7 +135,8 @@ setInterval(function() {
 }, 1000/20);
 
 console.log(`Listening on port ${connection.port}...`);
-await serve(async function(request:Request) {
+
+const handleRequest = async function(request:Request) {
 	if(request.headers.get('upgrade')!='websocket') {
 		return new Response(null, {status:501});
 	}
@@ -157,5 +160,10 @@ await serve(async function(request:Request) {
 	websocket.onerror = (error) => session.onError(error);
 
 	return response;
+}
 
-}, { port: connection.port });
+if(serverConfig.ssl){
+	await serveTls(handleRequest, { port: connection.port, certFile: serverConfig.ssl.certificateFile, keyFile: serverConfig.ssl.keyFile });
+}else{
+	await serve(handleRequest, { port: connection.port });
+}

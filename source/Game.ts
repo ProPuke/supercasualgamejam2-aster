@@ -1262,7 +1262,7 @@ class StartMode extends Mode {
 		'Shoot the gelatinous hexagonal ameba for points',
 		'(Beware, shooting nearby will anger them)',
 		'',
-		'Click again to start!'
+		'Press S to start!'
 	]
 
 	constructor(public game:Game) {
@@ -1285,7 +1285,7 @@ class StartMode extends Mode {
 				}
 			break;
 			case StartModePhase.instructions:
-				if(button=='Mouse0'){
+				if(button=='KeyS'){
 					this.phase = StartModePhase.starting;
 					this.phaseTime = Date.now();
 				}

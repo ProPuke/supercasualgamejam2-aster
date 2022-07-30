@@ -676,8 +676,7 @@ export class PlayMode extends Mode {
 							this.localPlayer.isAccelerating = true;
 						}
 					break;
-					case 'ControlLeft':
-					case 'ControlRight':
+					case 'Control':
 						inputChanged = true;
 						this.localPlayer.isFiring = true;
 					break;
@@ -685,7 +684,8 @@ export class PlayMode extends Mode {
 
 			}else{
 				switch(button) {
-					case 'KeyR':
+					case 'r':
+					case 'R':
 						if(this.localPlayer&&this.localPlayer.health<1){
 							this.game.remove_mode(this);
 							if(connection.enabled){
@@ -731,8 +731,7 @@ export class PlayMode extends Mode {
 				inputChanged = true;
 				this.localPlayer.isRight = false;
 			break;
-			case 'ControlLeft':
-			case 'ControlRight':
+			case 'Control':
 				inputChanged = true;
 				this.localPlayer.isFiring = false;
 			break;
@@ -1285,7 +1284,7 @@ class StartMode extends Mode {
 				}
 			break;
 			case StartModePhase.instructions:
-				if(button=='KeyS'){
+				if(button=='s'||button=='S'){
 					this.phase = StartModePhase.starting;
 					this.phaseTime = Date.now();
 				}

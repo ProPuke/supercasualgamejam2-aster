@@ -15,12 +15,12 @@ window.addEventListener('mousedown', function(event){
 
 window.addEventListener('keydown', function(event){
 	event.preventDefault();
-	game.on_button_down(event.code);
+	game.on_button_down(event.key);
 });
 
 window.addEventListener('keyup', function(event){
 	event.preventDefault();
-	game.on_button_up(event.code);
+	game.on_button_up(event.key);
 });
 
 let lastTime = Date.now();

@@ -3,6 +3,7 @@ import { add, clamp, concat_arrayBuffers, deltaLerp, dir, distance, dot, easeOut
 import Render from "./Render.ts";
 import * as connection from "./connection.ts";
 import { ReadBuffer, WriteBuffer } from "./Buffer.ts";
+import PacketType from "./PacketType.ts";
 
 class Mode {
 	startTime = Date.now();
@@ -284,7 +285,7 @@ class EnemySpinner extends Enemy {
 		this.health = 5;
 	}
 
-	get radius() { return this.health * 6; }
+	get radius() { return lerp(10, 30, this.health/5); }
 
 	serialise(buffer:WriteBuffer) {
 		super.serialise(buffer);
@@ -407,14 +408,14 @@ export class PlayMode extends Mode {
 	scoreMarkers:ScoreMarker[] = [];
 	localPlayer:Player|undefined;
 	cameraPos:Vec2 = [0,0]
-	worldSize:Vec2 = [2000,2000];
+	worldSize:Vec2 = [3000,3000];
 	idealEnemyCount:number;
 	lastClientUpdateTime = 0;
 
 	constructor(public game:Game, public client:Client|null, spawnPlayer:boolean) {
 		super();
 
-		this.idealEnemyCount = this.worldSize[0]*this.worldSize[1]/100000;
+		this.idealEnemyCount = 5;
 
 		this.cameraPos = scale(this.worldSize, 0.5);
 
@@ -432,7 +433,17 @@ export class PlayMode extends Mode {
 			}
 
 			const onMessage = (data:ArrayBuffer) => {
-				this.deserialise(new ReadBuffer(data));
+				const buffer = new ReadBuffer(data);
+				const [packetTypeId] = buffer.read_uint8(1);
+				const packetType:PacketType = packetTypeId;
+				switch(packetType){
+					case PacketType.fullUpdate:
+						this.deserialise(buffer, true);
+					break;
+					case PacketType.partialUpdate:
+						this.deserialise(buffer, false);
+					break;
+				}
 			};
 
 			client.events.once('disconnected', onDisconnected);
@@ -490,11 +501,29 @@ export class PlayMode extends Mode {
 		return player;
 	}
 
+	remove_player(player:Player) {
+		const index = this.players.indexOf(player);
+		if(index>=0){
+			this.players.splice(index, 1);
+		}
+
+		if(!this.client){
+			if(this.players.length<1){
+				this.idealEnemyCount = Math.max(3, Math.round(this.idealEnemyCount/2));
+				for(const enemy of this.enemies){
+					enemy.health = Math.max(0, enemy.health-Math.round(Math.random()*2));
+				}
+				this.game.remove_mode(this);
+				this.game.push_mode(new PlayMode(this.game, null, false));
+			}
+		}
+	}
+
 	get activePlayers():Player[] {
 		return this.players.filter(x => x.health>0);
 	}
 
-	serialise(player:Player|undefined, buffer:WriteBuffer) {
+	serialise(player:Player|undefined, buffer:WriteBuffer, full:boolean) {
 		buffer.write_float64(Date.now());
 		buffer.write_uint16(player?player.id+1:0, this.worldSize[0], this.worldSize[1], this.players.length);
 		for(const player of this.players){
@@ -505,9 +534,11 @@ export class PlayMode extends Mode {
 		for(const shot of this.shots){
 			shot.serialise(buffer);
 		}
-		buffer.write_uint16(this.obstacles.length);
-		for(const obstacle of this.obstacles){
-			obstacle.serialise(buffer);
+		if(full){
+			buffer.write_uint16(this.obstacles.length);
+			for(const obstacle of this.obstacles){
+				obstacle.serialise(buffer);
+			}
 		}
 		buffer.write_uint16(this.enemies.length);
 		for(const enemy of this.enemies){
@@ -515,7 +546,7 @@ export class PlayMode extends Mode {
 		}
 	}
 
-	deserialise(buffer:ReadBuffer) {
+	deserialise(buffer:ReadBuffer, full:boolean) {
 		const [time] = buffer.read_float64(1);
 
 		const timeOffset = time-Date.now();
@@ -547,11 +578,13 @@ export class PlayMode extends Mode {
 			this.shots.push(shot);
 		}
 
-		const [obstacleCount] = buffer.read_uint16(1);
-		this.obstacles.length = 0;
-		for(let i=0;i<obstacleCount;i++){
-			const obstacle = Obstacle.deserialise(buffer);
-			this.obstacles.push(obstacle);
+		if(full){
+			const [obstacleCount] = buffer.read_uint16(1);
+			this.obstacles.length = 0;
+			for(let i=0;i<obstacleCount;i++){
+				const obstacle = Obstacle.deserialise(buffer);
+				this.obstacles.push(obstacle);
+			}
 		}
 
 		const [enemyCount] = buffer.read_uint16(1);
@@ -655,7 +688,14 @@ export class PlayMode extends Mode {
 					case 'KeyR':
 						if(this.localPlayer&&this.localPlayer.health<1){
 							this.game.remove_mode(this);
-							this.game.push_mode(new PlayMode(this.game, this.client, !this.client));
+							if(connection.enabled){
+								if(this.client){
+									this.client.disconnect();
+								}
+								this.game.push_mode(new ConnectingMode(this.game));
+							}else{
+								this.game.push_mode(new PlayMode(this.game, this.client, !this.client));
+							}
 						}
 					break;
 				}
@@ -712,26 +752,28 @@ export class PlayMode extends Mode {
 	update(delta:number) {
 		const now = Date.now();
 
-		if(this.enemies.length<this.idealEnemyCount){
-			const positions:[number, Vec2][] = [];
+		if(!this.client){
+			if(this.enemies.length<this.idealEnemyCount){
+				const positions:[number, Vec2][] = [];
 
-			for(let i=0;i<5;i++){
-				const pos:Vec2 = [Math.random()*this.worldSize[0], Math.random()*this.worldSize[1]];
+				for(let i=0;i<5;i++){
+					const pos:Vec2 = [Math.random()*this.worldSize[0], Math.random()*this.worldSize[1]];
 
-				let playerDistance = 0;
-				for(const player of this.players){
-					const dist = distance(pos, player.pos);
-					if(!playerDistance||dist<playerDistance){
-						playerDistance = dist;
+					let playerDistance = 0;
+					for(const player of this.players){
+						const dist = distance(pos, player.pos);
+						if(!playerDistance||dist<playerDistance){
+							playerDistance = dist;
+						}
 					}
+
+					positions.push([playerDistance, pos]);
 				}
 
-				positions.push([playerDistance, pos]);
+				positions.sort((a,b) => b[0]-a[0]);
+
+				this.enemies.push(new EnemySpinner(positions[0][1]));
 			}
-
-			positions.sort((a,b) => b[0]-a[0]);
-
-			this.enemies.push(new EnemySpinner(positions[0][1]));
 		}
 
 		for(const player of this.players){
@@ -953,15 +995,31 @@ export class PlayMode extends Mode {
 						}
 						if(enemy.health<1){
 							this.enemies.splice(i2, 1);
-							if(!connection.enabled){
-								this.idealEnemyCount += 5;
-							}
+							this.idealEnemyCount = Math.min(this.worldSize[0]*this.worldSize[1]/70000, this.idealEnemyCount+1+Math.floor(this.idealEnemyCount/4));
 						}
 						this.shots.splice(i, 1);
 						destroyed = true;
 						break;
 					}
 				}
+
+				if(destroyed) continue;
+
+				for(const player of this.players){
+					if(shot.owner==player||player.health<1) continue;
+
+					if(distance(shot.pos, player.pos)<20+8){
+						if(player.take_damage(shot.pos, shot.owner)){
+							shot.owner.add_score(1);
+							this.add_scoreMarker(add(player.pos, [0, 20]), `+1`);
+						}
+
+						this.shots.splice(i, 1);
+						destroyed = true;
+						break;
+					}
+				}
+
 			}else{
 				for(const player of this.players){
 					if(player.health<1) continue;

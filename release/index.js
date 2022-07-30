@@ -193,24 +193,33 @@ function uint8_to_string(buffer) {
     ];
 }
 class Client {
+    open = true;
     socket;
     events = new EventEmitter;
     constructor(address, playerName){
         this.socket = new WebSocket(address);
         this.socket.binaryType = 'arraybuffer';
         this.socket.onopen = ()=>{
+            if (!this.open) return;
             this.socket.send(string_to_uint8(playerName));
             this.events.emit('connected');
         };
         this.socket.onclose = ()=>{
+            if (!this.open) return;
             this.events.emit('disconnected');
         };
         this.socket.onmessage = (message)=>{
+            if (!this.open) return;
             this.events.emit('message', message.data);
         };
     }
     send(data) {
         this.socket.send(data);
+    }
+    disconnect() {
+        if (!this.open) return;
+        this.open = false;
+        this.socket.close();
     }
 }
 const address = `ws://localhost:${8764}`;
@@ -281,6 +290,11 @@ class ReadBuffer {
     }
     buffer;
 }
+var PacketType;
+(function(PacketType) {
+    PacketType[PacketType["fullUpdate"] = 0] = "fullUpdate";
+    PacketType[PacketType["partialUpdate"] = 1] = "partialUpdate";
+})(PacketType || (PacketType = {}));
 class Mode {
     startTime = Date.now();
     on_button_down(button) {
@@ -593,7 +607,7 @@ class EnemySpinner extends Enemy {
         this.health = 5;
     }
     get radius() {
-        return this.health * 6;
+        return lerp(10, 30, this.health / 5);
     }
     serialise(buffer) {
         super.serialise(buffer);
@@ -718,11 +732,11 @@ class PlayMode extends Mode {
             0
         ];
         this.worldSize = [
-            2000,
-            2000
+            3000,
+            3000
         ];
         this.lastClientUpdateTime = 0;
-        this.idealEnemyCount = this.worldSize[0] * this.worldSize[1] / 100000;
+        this.idealEnemyCount = 5;
         this.cameraPos = scale(this.worldSize, 0.5);
         if (client) {
             const onDisconnected = ()=>{
@@ -734,7 +748,17 @@ class PlayMode extends Mode {
                 }
             };
             const onMessage = (data)=>{
-                this.deserialise(new ReadBuffer(data));
+                const buffer = new ReadBuffer(data);
+                const [packetTypeId] = buffer.read_uint8(1);
+                const packetType = packetTypeId;
+                switch(packetType){
+                    case PacketType.fullUpdate:
+                        this.deserialise(buffer, true);
+                        break;
+                    case PacketType.partialUpdate:
+                        this.deserialise(buffer, false);
+                        break;
+                }
             };
             client.events.once('disconnected', onDisconnected);
             client.events.on('message', onMessage);
@@ -786,10 +810,26 @@ class PlayMode extends Mode {
         this.players.push(player);
         return player;
     }
+    remove_player(player) {
+        const index = this.players.indexOf(player);
+        if (index >= 0) {
+            this.players.splice(index, 1);
+        }
+        if (!this.client) {
+            if (this.players.length < 1) {
+                this.idealEnemyCount = Math.max(3, Math.round(this.idealEnemyCount / 2));
+                for (const enemy of this.enemies){
+                    enemy.health = Math.max(0, enemy.health - Math.round(Math.random() * 2));
+                }
+                this.game.remove_mode(this);
+                this.game.push_mode(new PlayMode(this.game, null, false));
+            }
+        }
+    }
     get activePlayers() {
         return this.players.filter((x)=>x.health > 0);
     }
-    serialise(player, buffer) {
+    serialise(player, buffer, full) {
         buffer.write_float64(Date.now());
         buffer.write_uint16(player ? player.id + 1 : 0, this.worldSize[0], this.worldSize[1], this.players.length);
         for (const player1 of this.players){
@@ -800,16 +840,18 @@ class PlayMode extends Mode {
         for (const shot of this.shots){
             shot.serialise(buffer);
         }
-        buffer.write_uint16(this.obstacles.length);
-        for (const obstacle of this.obstacles){
-            obstacle.serialise(buffer);
+        if (full) {
+            buffer.write_uint16(this.obstacles.length);
+            for (const obstacle of this.obstacles){
+                obstacle.serialise(buffer);
+            }
         }
         buffer.write_uint16(this.enemies.length);
         for (const enemy of this.enemies){
             enemy.serialise(buffer);
         }
     }
-    deserialise(buffer) {
+    deserialise(buffer, full) {
         const [time] = buffer.read_float64(1);
         time - Date.now();
         const [playerId, sizeX, sizeY, playerCount] = buffer.read_uint16(4);
@@ -840,11 +882,13 @@ class PlayMode extends Mode {
             const shot = Shot.deserialise(this.players, buffer);
             this.shots.push(shot);
         }
-        const [obstacleCount] = buffer.read_uint16(1);
-        this.obstacles.length = 0;
-        for(let i2 = 0; i2 < obstacleCount; i2++){
-            const obstacle = Obstacle.deserialise(buffer);
-            this.obstacles.push(obstacle);
+        if (full) {
+            const [obstacleCount] = buffer.read_uint16(1);
+            this.obstacles.length = 0;
+            for(let i2 = 0; i2 < obstacleCount; i2++){
+                const obstacle = Obstacle.deserialise(buffer);
+                this.obstacles.push(obstacle);
+            }
         }
         const [enemyCount] = buffer.read_uint16(1);
         this.enemies.length = 0;
@@ -935,7 +979,12 @@ class PlayMode extends Mode {
                     case 'KeyR':
                         if (this.localPlayer && this.localPlayer.health < 1) {
                             this.game.remove_mode(this);
-                            this.game.push_mode(new PlayMode(this.game, this.client, !this.client));
+                            if (true) {
+                                if (this.client) {
+                                    this.client.disconnect();
+                                }
+                                this.game.push_mode(new ConnectingMode(this.game));
+                            }
                         }
                         break;
                 }
@@ -982,27 +1031,29 @@ class PlayMode extends Mode {
     }
     update(delta) {
         const now = Date.now();
-        if (this.enemies.length < this.idealEnemyCount) {
-            const positions = [];
-            for(let i = 0; i < 5; i++){
-                const pos = [
-                    Math.random() * this.worldSize[0],
-                    Math.random() * this.worldSize[1]
-                ];
-                let playerDistance = 0;
-                for (const player of this.players){
-                    const dist = distance(pos, player.pos);
-                    if (!playerDistance || dist < playerDistance) {
-                        playerDistance = dist;
+        if (!this.client) {
+            if (this.enemies.length < this.idealEnemyCount) {
+                const positions = [];
+                for(let i = 0; i < 5; i++){
+                    const pos = [
+                        Math.random() * this.worldSize[0],
+                        Math.random() * this.worldSize[1]
+                    ];
+                    let playerDistance = 0;
+                    for (const player of this.players){
+                        const dist = distance(pos, player.pos);
+                        if (!playerDistance || dist < playerDistance) {
+                            playerDistance = dist;
+                        }
                     }
+                    positions.push([
+                        playerDistance,
+                        pos
+                    ]);
                 }
-                positions.push([
-                    playerDistance,
-                    pos
-                ]);
+                positions.sort((a, b)=>b[0] - a[0]);
+                this.enemies.push(new EnemySpinner(positions[0][1]));
             }
-            positions.sort((a, b)=>b[0] - a[0]);
-            this.enemies.push(new EnemySpinner(positions[0][1]));
         }
         for (const player1 of this.players){
             player1.visualOffset[0] = deltaLerp(player1.visualOffset[0], 0, 0.95, delta);
@@ -1191,6 +1242,23 @@ class PlayMode extends Mode {
                         }
                         if (enemy1.health < 1) {
                             this.enemies.splice(i21, 1);
+                            this.idealEnemyCount = Math.min(this.worldSize[0] * this.worldSize[1] / 70000, this.idealEnemyCount + 1 + Math.floor(this.idealEnemyCount / 4));
+                        }
+                        this.shots.splice(i3, 1);
+                        destroyed = true;
+                        break;
+                    }
+                }
+                if (destroyed) continue;
+                for (const player3 of this.players){
+                    if (shot.owner == player3 || player3.health < 1) continue;
+                    if (distance(shot.pos, player3.pos) < 20 + 8) {
+                        if (player3.take_damage(shot.pos, shot.owner)) {
+                            shot.owner.add_score(1);
+                            this.add_scoreMarker(add(player3.pos, [
+                                0,
+                                20
+                            ]), `+1`);
                         }
                         this.shots.splice(i3, 1);
                         destroyed = true;
@@ -1198,10 +1266,10 @@ class PlayMode extends Mode {
                     }
                 }
             } else {
-                for (const player3 of this.players){
-                    if (player3.health < 1) continue;
-                    if (distance(shot.pos, player3.pos) < 20 + 8) {
-                        player3.take_damage(shot.pos, shot.owner);
+                for (const player4 of this.players){
+                    if (player4.health < 1) continue;
+                    if (distance(shot.pos, player4.pos) < 20 + 8) {
+                        player4.take_damage(shot.pos, shot.owner);
                         this.shots.splice(i3, 1);
                         destroyed = true;
                         break;

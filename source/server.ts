@@ -5,6 +5,7 @@ import * as connection from "./connection.ts";
 import Game, { Player, PlayMode } from "./Game.ts";
 import { concat_arrayBuffers, uint8_to_string } from "./common.ts";
 import { ReadBuffer, WriteBuffer } from "./Buffer.ts";
+import PacketType from "./PacketType.ts";
 
 enum ClientSessionStage {
 	handshake,
@@ -25,16 +26,14 @@ class ClientSession {
 	}
 
 	onClientConnect() {
-		console.log(`+ ${this.playerName||'[unnamed]'}`);
+		console.log(`+`);
+		this.send_state(true);
 	}
 
 	onClientDisconnect() {
 		if(this.player){
 			const play = get_play();
-			const index = play.players.indexOf(this.player);
-			if(index>=0){
-				play.players.splice(index, 1);
-			}
+			play.remove_player(this.player);
 		}
 		console.log(`- ${this.playerName||'[unnamed]'}`);
 	}
@@ -49,7 +48,7 @@ class ClientSession {
 					console.error(`Error: missing client name. Killed.`);
 					this.disconnect();
 				}
-				console.log(`++ ${this.playerName}`);
+				console.log(`+ authed as ${this.playerName}`);
 				this.stage = ClientSessionStage.playing;
 			break;
 			case ClientSessionStage.playing:
@@ -77,12 +76,13 @@ class ClientSession {
 		}
 	}
 
-	send_state() {
+	send_state(full = false) {
 		const play = get_play();
 
 		try{
 			const buffer = new WriteBuffer;
-			play.serialise(this.player, buffer);
+			buffer.write_uint8(full?PacketType.fullUpdate:PacketType.partialUpdate);
+			play.serialise(this.player, buffer, full);
 			this.websocket.send(buffer.get_buffer());
 		}catch(error){
 			console.error(`Error sending to socket for ${this.playerName||'[unnamed]'}`);
@@ -145,7 +145,10 @@ await serve(async function(request:Request) {
 
 	const session = new ClientSession(websocket);
 
-	websocket.onopen = () => session.onClientConnect();
+	websocket.onopen = () => {
+		sessions.push(session);
+		session.onClientConnect();
+	}
 	websocket.onmessage = (message) => session.onClientMessage(message.data);
 	websocket.onclose = () => {
 		session.onClientDisconnect();
@@ -155,8 +158,6 @@ await serve(async function(request:Request) {
 		}
 	}
 	websocket.onerror = (error) => session.onError(error);
-
-	sessions.push(session);
 
 	return response;
 

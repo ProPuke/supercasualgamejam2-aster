@@ -93,7 +93,7 @@ class ClientSession {
 }
 
 const game = new Game(undefined, false, false);
-const maxPlayers = 4;
+// const maxPlayers = 4;
 
 function get_play():PlayMode {
 	assert(game.modes.length>0);
@@ -118,17 +118,14 @@ let sessions:ClientSession[] = [];
 setInterval(function() {
 	const play = get_play();
 
-	if(play.activePlayers.length<maxPlayers){
+	// if(play.activePlayers.length<maxPlayers){
 		for(const session of sessions){
 			if(session.stage==ClientSessionStage.playing&&!session.player){
-				console.log(`Adding player to match ${session.playerName}`)
 				session.player = play.add_player(session.playerName);
-				break;
+				// break;
 			}
 		}
-	}else{
-		console.log(`${play.activePlayers.length}/${maxPlayers}`);
-	}
+	// }
 
 	for(const session of sessions){
 		session.send_state();

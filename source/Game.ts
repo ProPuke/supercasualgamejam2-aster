@@ -776,9 +776,9 @@ export class PlayMode extends Mode {
 		}
 
 		for(const player of this.players){
-			player.visualOffset[0] = deltaLerp(player.visualOffset[0], 0, 0.95, delta);
-			player.visualOffset[1] = deltaLerp(player.visualOffset[1], 0, 0.95, delta);
-			player.angleOffset = deltaLerp(player.angleOffset, 0, 0.95, delta);
+			player.visualOffset[0] = deltaLerp(player.visualOffset[0], 0, 0.98, delta);
+			player.visualOffset[1] = deltaLerp(player.visualOffset[1], 0, 0.98, delta);
+			player.angleOffset = deltaLerp(player.angleOffset, 0, 0.98, delta);
 
 			if(player.health>0){
 				player.update(this, delta);
